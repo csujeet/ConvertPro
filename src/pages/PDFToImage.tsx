@@ -6,13 +6,12 @@ import ProcessingStatus from '../components/ProcessingStatus';
 import { createZipFile } from '../utils/fileUtils';
 // Removed duplicate/old pdfjsLib import
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
-// Avoid bundler-specific worker import to prevent type errors in some setups.
-// Use a CDN fallback for the pdf.worker if the bundler doesn't provide the worker file.
-// Replace with a local worker path or proper bundler config in production if desired.
-GlobalWorkerOptions.workerSrc =
-  typeof window !== 'undefined'
-    ? (window as any).pdfWorkerSrc || 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.8.162/pdf.worker.min.js'
-    : '';
+
+// Import the worker file via Vite's ?url loader so it is served from the same origin as the app.
+// This avoids dynamic cross-origin module import failures (fake worker setup errors).
+// A TypeScript declaration for '*?url' is added in src/vite-env.d.ts.
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min?url';
+GlobalWorkerOptions.workerSrc = typeof window !== 'undefined' ? (window as any).pdfWorkerSrc || pdfWorkerUrl : '';
 import { saveAs } from 'file-saver';
 
 const PDFToImage: React.FC = () => {
@@ -42,20 +41,33 @@ const PDFToImage: React.FC = () => {
       for (let i = 1; i <= numPages; i++) {
         try {
           const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale: 1 });
+
+          // Use a slightly higher scale for clearer images; devicePixelRatio may be considered.
+          const scale = 1.5;
+          const viewport = page.getViewport({ scale });
+
           const canvas = document.createElement('canvas');
           const context = canvas.getContext('2d');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          if (context) {
-            await page.render({ canvasContext: context, viewport, canvas }).promise;
-            const blob: Blob | null = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
-            if (blob) {
-              const arrayBuffer = await blob.arrayBuffer();
-              images.push({ name: `page-${i}.jpg`, content: new Uint8Array(arrayBuffer) });
-            }
-            setProgress(10 + Math.round((i / numPages) * 80));
+          if (!context) throw new Error('Canvas 2D context not available');
+
+          // Set integer pixel dimensions on the canvas to avoid rendering issues
+          canvas.width = Math.max(1, Math.floor(viewport.width));
+          canvas.height = Math.max(1, Math.floor(viewport.height));
+
+          // Ensure CSS size matches logical size (helps some browsers/scaling)
+          canvas.style.width = `${Math.floor(viewport.width)}px`;
+          canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+          const renderContext = { canvasContext: context, viewport } as any;
+          await page.render(renderContext).promise;
+
+          const blob: Blob | null = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+          if (blob) {
+            const arrayBuffer = await blob.arrayBuffer();
+            images.push({ name: `page-${i}.jpg`, content: new Uint8Array(arrayBuffer) });
           }
+
+          setProgress(10 + Math.round((i / numPages) * 80));
         } catch (pageErr) {
           console.error('Error rendering page', i, pageErr);
         }
